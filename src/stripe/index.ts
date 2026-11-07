@@ -225,7 +225,7 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
 
     async ensureCustomer({ userId, email, name, existing, metadata }) {
       if (existing) return existing;
-      const params = { email, name, metadata: { ...metadata, user_id: userId } };
+      const params = { email: email ?? undefined, name, metadata: { ...metadata, user_id: userId } };
       // Two checkouts at once get one customer. Stripe refuses a key reused with other parameters,
       // so the key carries a hash of them; it lasts 24 hours, so the app stores the id it gets.
       const idempotencyKey = `customer:${userId}:${await sha256(JSON.stringify(params))}`;

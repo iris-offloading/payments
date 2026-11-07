@@ -47,7 +47,7 @@ export class FakeProvider implements PaymentProvider {
   readonly livemode = false;
   /** Every event the fake has sent, oldest first. */
   readonly events: PaymentEvent[] = [];
-  readonly customers = new Map<string, { email: string; userId: string; deleted: boolean }>();
+  readonly customers = new Map<string, { email: string | null; userId: string; deleted: boolean }>();
   readonly subscriptions = new Map<string, Subscription>();
   readonly payments = new Map<string, Payment>();
   readonly disputes = new Map<string, Dispute>();
@@ -88,11 +88,11 @@ export class FakeProvider implements PaymentProvider {
     return event;
   }
 
-  async ensureCustomer({ userId, email, existing }: { userId: string; email: string; existing?: string | null }) {
+  async ensureCustomer({ userId, email, existing }: { userId: string; email?: string | null; existing?: string | null }) {
     if (existing) return existing;
     for (const [id, c] of this.customers) if (c.userId === userId && !c.deleted) return id;
     const id = this.id('cus');
-    this.customers.set(id, { email, userId, deleted: false });
+    this.customers.set(id, { email: email ?? null, userId, deleted: false });
     return id;
   }
 

@@ -261,7 +261,7 @@ export interface PaymentProvider {
   readonly livemode: boolean;
 
   /** The customer for an app user: `existing` when given, else a new one (idempotent per user). */
-  ensureCustomer(input: { userId: string; email: string; name?: string; existing?: string | null; metadata?: Metadata }): Promise<string>;
+  ensureCustomer(input: { userId: string; email?: string | null; name?: string; existing?: string | null; metadata?: Metadata }): Promise<string>;
   /** Deletes the customer, which cancels its subscriptions at once. */
   deleteCustomer(customer: string): Promise<void>;
 
