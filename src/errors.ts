@@ -6,8 +6,9 @@
  * - rate_limited: the provider asked to slow down (429).
  * - unavailable: the provider failed or couldn't be reached (5xx, network).
  * - no_price: no active price has the lookup key.
+ * - too_many: a list is longer than the library reads (5,000 objects).
  */
-export type PaymentErrorCode = 'not_configured' | 'bad_signature' | 'not_found' | 'invalid' | 'rate_limited' | 'unavailable' | 'no_price';
+export type PaymentErrorCode = 'not_configured' | 'bad_signature' | 'not_found' | 'invalid' | 'rate_limited' | 'unavailable' | 'no_price' | 'too_many';
 
 /** Every error this library throws. `message` is for logs; show users your own words. */
 export class PaymentError extends Error {

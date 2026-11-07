@@ -93,7 +93,7 @@ test('processOnce holds an unfinished claim for its lease, then lets a retry tak
   const db = sqliteDb();
   const event = { id: 'evt_1', provider: 'stripe', type: 'invoice.paid' };
   // A Worker that died mid-apply: claimed, never done.
-  db.sql.prepare("INSERT INTO payment_events (id, provider, type, created_at) VALUES ('stripe:evt_1', 'stripe', 'invoice.paid', 1000)").run();
+  db.sql.prepare("INSERT INTO payment_events (id, provider, type, created_at, claimed_at) VALUES ('stripe:evt_1', 'stripe', 'invoice.paid', 1000, 1000)").run();
   assert.equal(await processOnce(db, event, async () => {}, { now: () => 1000 + 60_000 }), 'busy');
   assert.equal(await processOnce(db, event, async () => {}, { now: () => 1000 + 5 * 60_000 }), 'applied');
   assert.equal(await processOnce(db, event, async () => {}, { now: () => 1000 + 60 * 60_000 }), 'duplicate');
@@ -107,4 +107,15 @@ test('the fake takes price ids as well as lookup keys, and a trial starts free',
   const paid = events.find((e) => e.type === 'invoice.paid');
   assert.ok(paid?.type === 'invoice.paid' && paid.amount.amount === 0);
   assert.equal((await pay.customerState(customer)).subscriptions[0]?.status, 'trialing');
+});
+
+test('inline prices work for subscriptions and their renewals', async () => {
+  const pay = new FakeProvider({ prices: {} });
+  const customer = await pay.ensureCustomer({ userId: 'u1', email: 'a@b.c' });
+  const price = { inline: { amount: 900, currency: 'usd', name: 'Plus', interval: 'month' as const } };
+  const { id } = await pay.checkout({ customer, mode: 'subscription', items: [{ price }], successUrl: 'x', cancelUrl: 'y' });
+  pay.completeCheckout(id);
+  const sub = (await pay.customerState(customer)).subscriptions[0]!;
+  const [renewal] = pay.renew(sub.id);
+  assert.ok(renewal?.type === 'invoice.paid' && renewal.amount.amount === 900);
 });

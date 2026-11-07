@@ -1,19 +1,18 @@
 // Stripe objects onto the neutral model. Stripe has moved fields between API versions (an invoice's
 // subscription, a line's price, a charge's invoice), so each reader accepts the old and new shapes.
-import type { Dispute, DisputeStage, InvoiceLine, InvoiceReason, Metadata, Money, Payment, PaymentPurpose, Refund, Subscription, SubscriptionStatus } from '../types.ts';
+import { isLive } from '../model.ts';
+import type { Dispute, DisputeStage, InvoiceLine, InvoiceReason, Metadata, Money, Payment, PaymentPurpose, Purchase, Refund, Subscription, SubscriptionStatus } from '../types.ts';
 
 // Loose shapes: only the fields read here, all optional, since versions differ.
 export type Obj = Record<string, any>;
 
-const ms = (sec: unknown): number => (typeof sec === 'number' ? sec * 1000 : 0);
+export const ms = (sec: unknown): number => (typeof sec === 'number' ? sec * 1000 : 0);
 const msOrNull = (sec: unknown): number | null => (typeof sec === 'number' ? sec * 1000 : null);
 /** An id, whether Stripe sent the id or the expanded object. */
 export const str = (v: unknown): string | null => (typeof v === 'string' ? v : v && typeof v === 'object' && typeof (v as Obj).id === 'string' ? (v as Obj).id : null);
 export const meta = (v: unknown): Metadata => (v && typeof v === 'object' ? { ...(v as Metadata) } : {});
-const money = (amount: unknown, currency: unknown): Money => ({ amount: typeof amount === 'number' ? amount : 0, currency: typeof currency === 'string' ? currency : '' });
+export const money = (amount: unknown, currency: unknown): Money => ({ amount: typeof amount === 'number' ? amount : 0, currency: typeof currency === 'string' ? currency : '' });
 
-/** States that keep access. past_due keeps it while Stripe retries the payment. */
-const LIVE = new Set<SubscriptionStatus>(['trialing', 'active', 'past_due']);
 
 export function toSubscription(s: Obj): Subscription {
   const items: Obj[] = s.items?.data ?? [];
@@ -29,7 +28,7 @@ export function toSubscription(s: Obj): Subscription {
     id: s.id,
     customer: str(s.customer) ?? '',
     status,
-    live: LIVE.has(status),
+    live: isLive(status),
     items: items.map((i) => ({ price: str(i.price) ?? '', lookupKey: i.price?.lookup_key ?? null, quantity: i.quantity ?? 1 })),
     period: typeof start === 'number' && typeof end === 'number' ? { start: ms(start), end: ms(end) } : null,
     endsAt: msOrNull(endsAt),
@@ -57,13 +56,13 @@ export function invoiceReason(inv: Obj): InvoiceReason {
   }
 }
 
-/** An invoice's lines; `lookupKeys` names prices by id where the line itself doesn't carry the key. */
-export function invoiceLines(inv: Obj, lookupKeys: (priceId: string) => string | null): InvoiceLine[] {
+/** An invoice's lines. Newer API versions name only the price id, so lookupKey is then null. */
+export function invoiceLines(inv: Obj): InvoiceLine[] {
   return ((inv.lines?.data ?? []) as Obj[]).map((l) => {
     const price = str(l.pricing?.price_details?.price) ?? str(l.price);
     return {
       price,
-      lookupKey: l.price?.lookup_key ?? l.pricing?.price_details?.price?.lookup_key ?? (price ? lookupKeys(price) : null),
+      lookupKey: l.price?.lookup_key ?? l.pricing?.price_details?.price?.lookup_key ?? null,
       amount: l.amount ?? 0,
       period: { start: ms(l.period?.start), end: ms(l.period?.end) },
     };
@@ -119,4 +118,11 @@ export function toRefund(r: Obj): Refund {
     status: r.status,
     raw: r,
   };
+}
+
+/** Whether a Checkout Session's payment is in (or none was needed). */
+export const isPaidSession = (s: Obj): boolean => s.payment_status === 'paid' || s.payment_status === 'no_payment_required';
+
+export function toPurchase(s: Obj): Purchase {
+  return { checkoutSession: s.id, payment: str(s.payment_intent), amount: money(s.amount_total, s.currency), created: ms(s.created), metadata: meta(s.metadata), raw: s };
 }

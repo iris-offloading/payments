@@ -1,24 +1,11 @@
 // The Stripe adapter. Prices are found by lookup key, so the same code runs against a sandbox and
 // live mode; Stripe stays the record, and the app re-reads it (customerState, resolvePayment)
 // wherever event order matters.
-import { PaymentError } from '../errors.ts';
-import type {
-  CheckoutInput,
-  CustomerState,
-  Metadata,
-  Payment,
-  PaymentEvent,
-  PaymentProvider,
-  PaymentPurpose,
-  PortalInput,
-  PriceRef,
-  Purchase,
-  Refund,
-  RefundInput,
-  Subscription,
-} from '../types.ts';
+import { isPaymentError, PaymentError } from '../errors.ts';
+import { newestFirst } from '../model.ts';
+import type { CheckoutInput, CustomerState, Payment, PaymentEvent, PaymentEventType, PaymentProvider, PaymentPurpose, PortalInput, Refund, RefundInput, Subscription } from '../types.ts';
 import { stripeClient, type StripeParams, type StripeRequest } from './client.ts';
-import { invoiceLines, invoiceReason, invoiceSubscription, meta, str, toDispute, toPayment, toRefund, toSubscription, type Obj } from './map.ts';
+import { invoiceLines, invoiceReason, invoiceSubscription, isPaidSession, meta, money, ms, str, toDispute, toPayment, toPurchase, toRefund, toSubscription, type Obj } from './map.ts';
 import { verifyStripeSignature } from './webhook.ts';
 
 export { stripeClient, stripeForm, type StripeParams, type StripeRequest } from './client.ts';
@@ -42,7 +29,7 @@ export interface StripeOptions {
   fetch?: typeof fetch;
   /** Stripe Connect: act on this connected account. */
   account?: string;
-  /** Clock for webhook checks, for tests. */
+  /** Clock for webhook checks and the price cache, for tests. */
   now?: () => number;
 }
 
@@ -50,7 +37,7 @@ export interface StripeProvider extends PaymentProvider {
   readonly name: 'stripe';
   /** The raw API, for anything the neutral interface doesn't cover. */
   readonly request: StripeRequest;
-  /** The active price with this lookup key (cached per isolate). Throws 'no_price' when there is none. */
+  /** The active price with this lookup key (cached a few minutes). Throws 'no_price' when there is none. */
   priceId(lookupKey: string): Promise<string>;
 }
 
@@ -59,24 +46,47 @@ const MAX_PAGES = 50;
 const PAGE = 100;
 
 /**
- * Price ids by lookup key, both ways. A key moves to a new price when the price changes in Stripe,
- * so an entry lasts PRICE_TTL, and a checkout that Stripe refuses drops the entries it used.
+ * Price ids by lookup key, per Stripe account. A key moves to a new price when the price changes in
+ * Stripe, so an entry lasts PRICE_TTL. The promise is cached, so concurrent lookups share one call.
  */
-const PRICE_TTL = 10 * 60_000;
-const priceIds = new Map<string, { id: string; at: number }>();
-const lookupKeys = new Map<string, string>();
+const PRICE_TTL = 5 * 60_000;
+const priceIds = new Map<string, { id: Promise<string>; at: number }>();
+
+/** Stripe event types onto neutral ones; any other type is 'unhandled'. */
+const EVENT_TYPES: Record<string, PaymentEventType> = {
+  'checkout.session.completed': 'checkout.completed',
+  'checkout.session.async_payment_succeeded': 'checkout.paid',
+  'checkout.session.async_payment_failed': 'checkout.failed',
+  'customer.subscription.created': 'subscription.created',
+  'customer.subscription.updated': 'subscription.updated',
+  'customer.subscription.paused': 'subscription.updated',
+  'customer.subscription.resumed': 'subscription.updated',
+  'customer.subscription.deleted': 'subscription.deleted',
+  'invoice.paid': 'invoice.paid',
+  'invoice.payment_failed': 'invoice.payment_failed',
+  'charge.refunded': 'payment.refunded',
+  'charge.dispute.created': 'dispute.opened',
+  'charge.dispute.updated': 'dispute.updated',
+  'charge.dispute.funds_withdrawn': 'dispute.updated',
+  'charge.dispute.funds_reinstated': 'dispute.updated',
+  'charge.dispute.closed': 'dispute.closed',
+  'customer.updated': 'customer.updated',
+  'customer.deleted': 'customer.deleted',
+};
 
 /** Charge ids, as opposed to PaymentIntent ids. */
 const isChargeId = (id: string) => id.startsWith('ch_') || id.startsWith('py_');
 
 /** `p`, or null when Stripe has no such object. */
-async function orNull<T>(p: Promise<T>): Promise<T | null> {
-  try {
-    return await p;
-  } catch (err) {
-    if (err instanceof PaymentError && err.code === 'not_found') return null;
+const orNull = <T>(p: Promise<T>): Promise<T | null> =>
+  p.catch((err) => {
+    if (isPaymentError(err, 'not_found')) return null;
     throw err;
-  }
+  });
+
+async function sha256(text: string): Promise<string> {
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+  return [...hash.slice(0, 12)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 export function createStripeProvider(opts: StripeOptions): StripeProvider {
@@ -100,21 +110,21 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
       if (!page.has_more || !page.data.length) return out;
       after = page.data[page.data.length - 1]!.id;
     }
-    throw new PaymentError('invalid', `Stripe ${path} lists more than ${MAX_PAGES * PAGE} objects.`);
+    throw new PaymentError('too_many', `Stripe ${path} lists more than ${MAX_PAGES * PAGE} objects.`);
   }
 
-  async function priceId(lookupKey: string): Promise<string> {
+  function priceId(lookupKey: string): Promise<string> {
     const known = priceIds.get(cache + lookupKey);
     if (known && now() - known.at < PRICE_TTL) return known.id;
-    const { data } = await request<{ data: { id: string }[] }>('GET', '/v1/prices', { lookup_keys: [lookupKey], active: true, limit: 1 });
-    const id = data[0]?.id;
-    if (!id) throw new PaymentError('no_price', `No active Stripe price has the lookup key ${lookupKey}.`);
+    const id = request<{ data: { id: string }[] }>('GET', '/v1/prices', { lookup_keys: [lookupKey], active: true, limit: 1 }).then(({ data }) => {
+      if (!data[0]) throw new PaymentError('no_price', `No active Stripe price has the lookup key ${lookupKey}.`);
+      return data[0].id;
+    });
     priceIds.set(cache + lookupKey, { id, at: now() });
-    lookupKeys.set(cache + id, lookupKey);
+    // A failed lookup isn't kept.
+    id.catch(() => priceIds.get(cache + lookupKey)?.id === id && priceIds.delete(cache + lookupKey));
     return id;
   }
-  const keyOf = (price: string) => lookupKeys.get(cache + price) ?? null;
-  const resolvePrice = (p: PriceRef) => ('id' in p ? Promise.resolve(p.id) : priceId(p.lookupKey));
 
   /**
    * What a charge paid for: a subscription invoice, a one-time Checkout, or a bare PaymentIntent.
@@ -130,25 +140,17 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
           ? ((await request<{ data: { invoice: Obj | null }[] }>('GET', '/v1/invoice_payments', { payment: { type: 'payment_intent', payment_intent: pi }, expand: ['data.invoice'], limit: 1 })).data[0]?.invoice ?? null)
           : null;
     const sub = invoice && typeof invoice === 'object' ? invoiceSubscription(invoice) : null;
-    if (invoice && sub) return { kind: 'subscription', subscription: sub, invoice: invoice.id, reason: invoiceReason(invoice), lines: invoiceLines(invoice, keyOf) };
+    if (invoice && sub) return { kind: 'subscription', subscription: sub, invoice: invoice.id, reason: invoiceReason(invoice), lines: invoiceLines(invoice) };
     if (!pi) return { kind: 'unknown' };
     const session = (await request<{ data: Obj[] }>('GET', '/v1/checkout/sessions', { payment_intent: pi, limit: 1 })).data[0];
-    return session ? { kind: 'one_time', checkoutSession: session.id, metadata: meta(session.metadata) } : { kind: 'one_time', checkoutSession: null, metadata: meta(charge.metadata) };
-  }
-
-  async function paymentOfCharge(charge: Obj): Promise<Payment> {
-    return toPayment(charge, await purposeOf(charge));
-  }
-
-  async function chargeById(id: string): Promise<Obj | null> {
-    if (isChargeId(id)) return orNull(request<Obj>('GET', `/v1/charges/${encodeURIComponent(id)}`));
-    const pi = await orNull(request<Obj>('GET', `/v1/payment_intents/${encodeURIComponent(id)}`, { expand: ['latest_charge'] }));
-    return pi?.latest_charge && typeof pi.latest_charge === 'object' ? pi.latest_charge : null;
+    return { kind: 'one_time', checkoutSession: session?.id ?? null, metadata: meta(session ? session.metadata : charge.metadata) };
   }
 
   async function resolvePayment(id: string): Promise<Payment | null> {
-    const charge = await chargeById(id);
-    return charge ? paymentOfCharge(charge) : null;
+    const charge = isChargeId(id)
+      ? await orNull(request<Obj>('GET', `/v1/charges/${encodeURIComponent(id)}`))
+      : (await orNull(request<Obj>('GET', `/v1/payment_intents/${encodeURIComponent(id)}`, { expand: ['latest_charge'] })))?.latest_charge;
+    return charge && typeof charge === 'object' ? toPayment(charge, await purposeOf(charge)) : null;
   }
 
   async function getSubscription(id: string): Promise<Subscription | null> {
@@ -157,17 +159,19 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
   }
 
   async function toEvent(e: Obj): Promise<PaymentEvent> {
-    const base = { id: e.id as string, provider: 'stripe', providerType: e.type as string, created: (e.created ?? 0) * 1000, livemode: !!e.livemode, raw: e };
+    const base = { id: e.id as string, provider: 'stripe', providerType: e.type as string, created: ms(e.created), livemode: !!e.livemode, raw: e };
     const o: Obj = e.data?.object ?? {};
     const customer = str(o.customer);
+    const unhandled: PaymentEvent = { ...base, type: 'unhandled', customer };
     // A sandbox event sent to a live endpoint (or the reverse) must not touch real accounts.
-    if (typeof e.livemode === 'boolean' && e.livemode !== livemode) return { ...base, type: 'unhandled', customer };
-    switch (e.type) {
-      case 'checkout.session.completed':
-      case 'checkout.session.async_payment_succeeded':
-      case 'checkout.session.async_payment_failed': {
-        if (o.mode !== 'payment' && o.mode !== 'subscription') return { ...base, type: 'unhandled', customer };
-        const common = {
+    if (typeof e.livemode === 'boolean' && e.livemode !== livemode) return unhandled;
+    const type = EVENT_TYPES[e.type];
+    switch (type) {
+      case 'checkout.completed':
+      case 'checkout.paid':
+      case 'checkout.failed': {
+        if (o.mode !== 'payment' && o.mode !== 'subscription') return unhandled;
+        const fields = {
           customer,
           checkoutSession: o.id as string,
           mode: o.mode === 'payment' ? ('one_time' as const) : ('subscription' as const),
@@ -176,49 +180,40 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
           clientReference: o.client_reference_id ?? null,
           metadata: meta(o.metadata),
         };
-        if (e.type === 'checkout.session.completed') {
-          const paid = o.payment_status === 'paid' || o.payment_status === 'no_payment_required';
-          return { ...base, ...common, type: 'checkout.completed', paid, amount: typeof o.amount_total === 'number' ? { amount: o.amount_total, currency: o.currency ?? '' } : null };
-        }
-        return { ...base, ...common, type: e.type === 'checkout.session.async_payment_succeeded' ? 'checkout.paid' : 'checkout.failed' };
+        if (type !== 'checkout.completed') return { ...base, ...fields, type };
+        return { ...base, ...fields, type, paid: isPaidSession(o), amount: typeof o.amount_total === 'number' ? money(o.amount_total, o.currency) : null };
       }
-      case 'customer.subscription.created':
-      case 'customer.subscription.updated':
-      case 'customer.subscription.deleted':
-      case 'customer.subscription.paused':
-      case 'customer.subscription.resumed': {
-        const type = e.type === 'customer.subscription.created' ? 'subscription.created' : e.type === 'customer.subscription.deleted' ? 'subscription.deleted' : 'subscription.updated';
+      case 'subscription.created':
+      case 'subscription.updated':
+      case 'subscription.deleted':
         return { ...base, type, customer: customer ?? '', subscription: toSubscription(o) };
-      }
       case 'invoice.paid':
       case 'invoice.payment_failed':
         return {
           ...base,
-          type: e.type,
+          type,
           customer: customer ?? '',
           subscription: invoiceSubscription(o),
           invoice: o.id,
           reason: invoiceReason(o),
-          amount: { amount: e.type === 'invoice.paid' ? (o.amount_paid ?? 0) : (o.amount_due ?? 0), currency: o.currency ?? '' },
-          lines: invoiceLines(o, keyOf),
+          amount: money(type === 'invoice.paid' ? o.amount_paid : o.amount_due, o.currency),
+          lines: invoiceLines(o),
         };
-      case 'charge.refunded':
-        return { ...base, type: 'payment.refunded', customer, payment: await paymentOfCharge(o), refunded: o.amount_refunded ?? 0 };
-      case 'charge.dispute.created':
-      case 'charge.dispute.updated':
-      case 'charge.dispute.funds_withdrawn':
-      case 'charge.dispute.funds_reinstated':
-      case 'charge.dispute.closed': {
+      case 'payment.refunded':
+        return { ...base, type, customer, payment: toPayment(o, await purposeOf(o)), refunded: o.amount_refunded ?? 0 };
+      case 'dispute.opened':
+      case 'dispute.updated':
+      case 'dispute.closed': {
         const dispute = toDispute(o);
-        const payment = dispute.charge ? await resolvePayment(dispute.charge) : dispute.payment ? await resolvePayment(dispute.payment) : null;
-        const type = e.type === 'charge.dispute.created' ? 'dispute.opened' : e.type === 'charge.dispute.closed' ? 'dispute.closed' : 'dispute.updated';
+        const ref = dispute.charge ?? dispute.payment;
+        const payment = ref ? await resolvePayment(ref) : null;
         return { ...base, type, customer: payment?.customer ?? null, dispute, payment };
       }
       case 'customer.updated':
       case 'customer.deleted':
-        return { ...base, type: e.type, customer: o.id };
+        return { ...base, type, customer: o.id };
       default:
-        return { ...base, type: 'unhandled', customer };
+        return unhandled;
     }
   }
 
@@ -230,10 +225,11 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
 
     async ensureCustomer({ userId, email, name, existing, metadata }) {
       if (existing) return existing;
-      // Two checkouts at once get one customer. The key holds the email, since Stripe refuses a key
-      // reused with other parameters; it lasts 24 hours, so the app stores the id it gets.
-      const c = await request<{ id: string }>('POST', '/v1/customers', { email, name, metadata: { ...metadata, user_id: userId } }, { idempotencyKey: `customer:${userId}:${email}` });
-      return c.id;
+      const params = { email, name, metadata: { ...metadata, user_id: userId } };
+      // Two checkouts at once get one customer. Stripe refuses a key reused with other parameters,
+      // so the key carries a hash of them; it lasts 24 hours, so the app stores the id it gets.
+      const idempotencyKey = `customer:${userId}:${await sha256(JSON.stringify(params))}`;
+      return (await request<{ id: string }>('POST', '/v1/customers', params, { idempotencyKey })).id;
     },
 
     async deleteCustomer(customer) {
@@ -241,41 +237,43 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
     },
 
     async checkout(input: CheckoutInput) {
-      const line_items = await Promise.all(input.items.map(async (i) => ({ price: await resolvePrice(i.price), quantity: i.quantity ?? 1 })));
-      const forget = () => input.items.forEach((i) => 'lookupKey' in i.price && priceIds.delete(cache + i.price.lookupKey));
-      const metadata: Metadata | undefined = input.metadata;
-      const params: StripeParams = {
-        mode: input.mode === 'one_time' ? 'payment' : 'subscription',
-        customer: input.customer,
-        line_items,
-        success_url: input.successUrl,
-        cancel_url: input.cancelUrl,
-        client_reference_id: input.clientReference,
-        metadata,
-        allow_promotion_codes: input.allowPromotionCodes,
-        automatic_tax: input.automaticTax ? { enabled: true } : undefined,
-        // Automatic tax needs an address, which Checkout may save on the existing customer.
-        customer_update: input.automaticTax ? { address: 'auto', name: 'auto' } : undefined,
-        subscription_data: input.mode === 'subscription' ? { metadata, trial_period_days: input.trialDays } : undefined,
-        payment_intent_data: input.mode === 'one_time' ? { metadata } : undefined,
-      };
-      const s = await request<{ id: string; url: string | null }>('POST', '/v1/checkout/sessions', params, { idempotencyKey: input.idempotencyKey }).catch((err) => {
-        // Perhaps a cached price that was archived: the next try looks the keys up again.
-        if (err instanceof PaymentError && err.code === 'invalid') forget();
-        throw err;
-      });
+      const line_items = await Promise.all(
+        input.items.map(async ({ price: p, quantity = 1 }) => {
+          if ('id' in p) return { price: p.id, quantity };
+          if ('lookupKey' in p) return { price: await priceId(p.lookupKey), quantity };
+          const { amount, currency, name, interval, taxCode } = p.inline;
+          return { price_data: { currency, unit_amount: amount, product_data: { name, tax_code: taxCode }, recurring: interval && { interval } }, quantity };
+        }),
+      );
+      const { metadata, mode } = input;
+      const s = await request<{ id: string; url: string | null }>(
+        'POST',
+        '/v1/checkout/sessions',
+        {
+          mode: mode === 'one_time' ? 'payment' : 'subscription',
+          customer: input.customer,
+          line_items,
+          success_url: input.successUrl,
+          cancel_url: input.cancelUrl,
+          client_reference_id: input.clientReference,
+          metadata,
+          allow_promotion_codes: input.allowPromotionCodes,
+          automatic_tax: input.automaticTax && { enabled: true },
+          // Automatic tax needs an address, which Checkout may save on the existing customer.
+          customer_update: input.automaticTax && { address: 'auto', name: 'auto' },
+          subscription_data: mode === 'subscription' ? { metadata, trial_period_days: input.trialDays } : undefined,
+          payment_intent_data: mode === 'one_time' ? { metadata } : undefined,
+        },
+        { idempotencyKey: input.idempotencyKey },
+      );
       if (!s.url) throw new PaymentError('unavailable', 'Stripe made a Checkout Session without a URL.');
       return { id: s.id, url: s.url };
     },
 
-    async portal(input: PortalInput) {
-      const flow = input.flow;
-      const flow_data: StripeParams | undefined = !flow
-        ? undefined
-        : flow.type === 'cancel'
-          ? { type: 'subscription_cancel', subscription_cancel: { subscription: flow.subscription } }
-          : { type: 'subscription_update', subscription_update: { subscription: flow.subscription } };
-      const s = await request<{ url: string }>('POST', '/v1/billing_portal/sessions', { customer: input.customer, return_url: input.returnUrl, configuration: input.configuration, flow_data });
+    async portal({ customer, returnUrl, configuration, flow }: PortalInput) {
+      const flowType = flow && `subscription_${flow.type}`;
+      const flow_data = flow && flowType ? { type: flowType, [flowType]: { subscription: flow.subscription } } : undefined;
+      const s = await request<{ url: string }>('POST', '/v1/billing_portal/sessions', { customer, return_url: returnUrl, configuration, flow_data });
       return { url: s.url };
     },
 
@@ -284,26 +282,20 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
         list<Obj>('/v1/subscriptions', { customer, status: 'all', expand: ['data.latest_invoice'] }),
         list<Obj>('/v1/checkout/sessions', { customer, status: 'complete' }),
       ]);
-      const purchases: Purchase[] = sessions
-        .filter((s) => s.mode === 'payment' && (s.payment_status === 'paid' || s.payment_status === 'no_payment_required'))
-        .map((s) => ({
-          checkoutSession: s.id,
-          payment: str(s.payment_intent),
-          amount: { amount: s.amount_total ?? 0, currency: s.currency ?? '' },
-          created: (s.created ?? 0) * 1000,
-          metadata: meta(s.metadata),
-          raw: s,
-        }));
-      return { subscriptions: subs.map(toSubscription).sort((a, b) => b.created - a.created), purchases: purchases.sort((a, b) => b.created - a.created) };
+      return {
+        subscriptions: newestFirst(subs.map(toSubscription)),
+        purchases: newestFirst(sessions.filter((s) => s.mode === 'payment' && isPaidSession(s)).map(toPurchase)),
+      };
     },
 
     getSubscription,
 
     async cancelSubscription(id, { at = 'now' } = {}) {
+      const path = `/v1/subscriptions/${encodeURIComponent(id)}`;
       const s =
         at === 'now'
-          ? await request<Obj>('DELETE', `/v1/subscriptions/${encodeURIComponent(id)}`, { expand: ['latest_invoice'] })
-          : await request<Obj>('POST', `/v1/subscriptions/${encodeURIComponent(id)}`, { cancel_at_period_end: true, expand: ['latest_invoice'] });
+          ? await request<Obj>('DELETE', path, { expand: ['latest_invoice'] })
+          : await request<Obj>('POST', path, { cancel_at_period_end: true, expand: ['latest_invoice'] });
       return toSubscription(s);
     },
 

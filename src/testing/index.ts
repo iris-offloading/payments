@@ -3,6 +3,7 @@
 // real provider would send. Apps test their webhook handling by feeding those events back in
 // through webhookRequest and parseWebhook, without stubbing HTTP.
 import { PaymentError } from '../errors.ts';
+import { isLive, newestFirst } from '../model.ts';
 import type {
   CheckoutInput,
   CustomerState,
@@ -21,7 +22,7 @@ import type {
 interface Session {
   id: string;
   input: CheckoutInput;
-  prices: { price: string; lookupKey: string | null; quantity: number }[];
+  prices: { price: string; lookupKey: string | null; amount: number; quantity: number }[];
   status: 'open' | 'complete';
 }
 
@@ -53,6 +54,8 @@ export class FakeProvider implements PaymentProvider {
   readonly sessions = new Map<string, Session>();
   readonly purchases: Purchase[] = [];
   private seq = 0;
+  /** Amounts by price id, for renewals. */
+  private readonly amounts = new Map<string, number>();
   private readonly opts: Required<FakeOptions>;
 
   constructor(opts: FakeOptions) {
@@ -103,10 +106,17 @@ export class FakeProvider implements PaymentProvider {
 
   async checkout(input: CheckoutInput) {
     const prices = input.items.map((i) => {
+      const quantity = i.quantity ?? 1;
+      if ('inline' in i.price) {
+        const price = this.id('price');
+        this.amounts.set(price, i.price.inline.amount);
+        return { price, lookupKey: null, amount: i.price.inline.amount, quantity };
+      }
       // A price's id is `price_` and its lookup key.
       const lookupKey = 'lookupKey' in i.price ? i.price.lookupKey : i.price.id.replace(/^price_/, '');
-      this.priceOf(lookupKey);
-      return { price: FakeProvider.priceId(lookupKey), lookupKey, quantity: i.quantity ?? 1 };
+      const price = FakeProvider.priceId(lookupKey);
+      this.amounts.set(price, this.priceOf(lookupKey));
+      return { price, lookupKey, amount: this.priceOf(lookupKey), quantity };
     });
     const id = this.id('cs');
     this.sessions.set(id, { id, input, prices, status: 'open' });
@@ -119,8 +129,8 @@ export class FakeProvider implements PaymentProvider {
 
   async customerState(customer: string): Promise<CustomerState> {
     return {
-      subscriptions: [...this.subscriptions.values()].filter((s) => s.customer === customer).sort((a, b) => b.created - a.created),
-      purchases: this.purchases.filter((p) => (this.payments.get(p.payment ?? '')?.customer ?? null) === customer).sort((a, b) => b.created - a.created),
+      subscriptions: newestFirst([...this.subscriptions.values()].filter((s) => s.customer === customer)),
+      purchases: newestFirst(this.purchases.filter((p) => this.payments.get(p.payment ?? '')?.customer === customer)),
     };
   }
 
@@ -174,7 +184,7 @@ export class FakeProvider implements PaymentProvider {
     if (!s || s.status !== 'open') throw new PaymentError('invalid', `Checkout ${id} isn't open.`);
     s.status = 'complete';
     const from = this.events.length;
-    const total = s.prices.reduce((n, p) => n + this.priceOf(p.lookupKey!) * p.quantity, 0);
+    const total = s.prices.reduce((n, p) => n + p.amount * p.quantity, 0);
     const metadata: Metadata = { ...s.input.metadata };
     const common = { customer: s.input.customer, checkoutSession: id, clientReference: s.input.clientReference ?? null, metadata };
     if (s.input.mode === 'one_time') {
@@ -187,7 +197,7 @@ export class FakeProvider implements PaymentProvider {
         id: this.id('sub'),
         customer: s.input.customer,
         status: paid ? (s.input.trialDays ? 'trialing' : 'active') : 'incomplete',
-        live: paid,
+        live: false,
         items: s.prices.map((p) => ({ price: p.price, lookupKey: p.lookupKey, quantity: p.quantity })),
         period: { start, end: start + this.opts.periodMs },
         endsAt: null,
@@ -196,6 +206,7 @@ export class FakeProvider implements PaymentProvider {
         metadata,
         raw: null,
       };
+      sub.live = isLive(sub.status);
       this.subscriptions.set(sub.id, sub);
       this.emit({ type: 'subscription.created', customer: sub.customer, subscription: { ...sub } });
       // A trial's first invoice is for nothing.
@@ -215,12 +226,12 @@ export class FakeProvider implements PaymentProvider {
       return this.events.slice(from);
     }
     s.period = { start: s.period.end, end: s.period.end + this.opts.periodMs };
-    const total = s.items.reduce((n, i) => n + this.priceOf(i.lookupKey!) * i.quantity, 0);
+    const total = s.items.reduce((n, i) => n + this.amounts.get(i.price)! * i.quantity, 0);
     if (paid) {
-      s.status = 'active';
+      this.setStatus(s, 'active');
       this.invoice(s, 'cycle', total);
     } else {
-      s.status = 'past_due';
+      this.setStatus(s, 'past_due');
       s.latestInvoicePaid = false;
       this.emit({ type: 'invoice.payment_failed', customer: s.customer, subscription: s.id, invoice: this.id('in'), reason: 'cycle', amount: this.money(total), lines: [] });
     }
@@ -256,16 +267,20 @@ export class FakeProvider implements PaymentProvider {
 
   private invoice(s: Subscription, reason: 'create' | 'cycle', total: number): Payment {
     const invoice = this.id('in');
-    const lines = s.items.map((i) => ({ price: i.price, lookupKey: i.lookupKey, amount: total && this.priceOf(i.lookupKey!) * i.quantity, period: { ...s.period! } }));
+    const lines = s.items.map((i) => ({ price: i.price, lookupKey: i.lookupKey, amount: total && this.amounts.get(i.price)! * i.quantity, period: { ...s.period! } }));
     const payment = this.pay(s.customer, total, { kind: 'subscription', subscription: s.id, invoice, reason, lines });
     s.latestInvoicePaid = true;
     this.emit({ type: 'invoice.paid', customer: s.customer, subscription: s.id, invoice, reason, amount: this.money(total), lines });
     return payment;
   }
 
+  private setStatus(s: Subscription, status: Subscription['status']) {
+    s.status = status;
+    s.live = isLive(status);
+  }
+
   private endSubscription(s: Subscription) {
-    s.status = 'canceled';
-    s.live = false;
+    this.setStatus(s, 'canceled');
     s.endsAt = this.now();
     this.emit({ type: 'subscription.deleted', customer: s.customer, subscription: { ...s } });
   }

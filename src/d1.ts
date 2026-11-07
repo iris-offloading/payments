@@ -15,6 +15,8 @@ export const PAYMENT_EVENTS_SQL = `CREATE TABLE IF NOT EXISTS payment_events (
   provider TEXT NOT NULL,
   type TEXT NOT NULL,
   created_at INTEGER NOT NULL,
+  -- When the event was last claimed; 0 once a failed apply released it.
+  claimed_at INTEGER NOT NULL DEFAULT 0,
   done INTEGER NOT NULL DEFAULT 0
 );`;
 
@@ -40,10 +42,10 @@ export async function processOnce<E extends { id: string; provider: string; type
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) throw new Error(`Bad table name ${table}`);
   const id = `${event.provider}:${event.id}`;
   const now = (opts.now ?? Date.now)();
-  // A new claim, or one that lapsed unfinished.
+  // A new claim, or one that lapsed or was released unfinished.
   const claimed = await db
-    .prepare(`INSERT INTO ${table} (id, provider, type, created_at, done) VALUES (?1, ?2, ?3, ?4, 0)
-      ON CONFLICT (id) DO UPDATE SET created_at = ?4 WHERE done = 0 AND created_at <= ?5`)
+    .prepare(`INSERT INTO ${table} (id, provider, type, created_at, claimed_at) VALUES (?1, ?2, ?3, ?4, ?4)
+      ON CONFLICT (id) DO UPDATE SET claimed_at = ?4 WHERE done = 0 AND claimed_at <= ?5`)
     .bind(id, event.provider, event.type, now, now - (opts.leaseMs ?? LEASE))
     .run();
   if (!claimed.meta.changes) {
@@ -53,7 +55,8 @@ export async function processOnce<E extends { id: string; provider: string; type
   try {
     await apply(event);
   } catch (err) {
-    await db.prepare(`DELETE FROM ${table} WHERE id = ? AND done = 0 AND created_at = ?`).bind(id, now).run().catch(() => {});
+    // Released at once, so the provider's retry needn't wait out the lease; if this fails, the lease still ends.
+    await db.prepare(`UPDATE ${table} SET claimed_at = 0 WHERE id = ? AND done = 0 AND claimed_at = ?`).bind(id, now).run().catch(() => {});
     throw err;
   }
   await db.prepare(`UPDATE ${table} SET done = 1 WHERE id = ?`).bind(id).run();

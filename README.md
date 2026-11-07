@@ -99,7 +99,7 @@ app.post('/billing/webhook', async (c) => {
 died mid-apply lapses after five minutes, so Stripe's retry applies the event then. It needs this table in a migration (`PAYMENT_EVENTS_SQL` holds the same SQL):
 
 ```sql
-CREATE TABLE IF NOT EXISTS payment_events (id TEXT PRIMARY KEY, provider TEXT NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS payment_events (id TEXT PRIMARY KEY, provider TEXT NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, claimed_at INTEGER NOT NULL DEFAULT 0, done INTEGER NOT NULL DEFAULT 0);
 ```
 
 ## The provider interface
@@ -130,7 +130,7 @@ CREATE TABLE IF NOT EXISTS payment_events (id TEXT PRIMARY KEY, provider TEXT NO
 | `unhandled` | anything else, or an event from the other mode (sandbox vs live) | `providerType`, `raw` |
 
 Errors are `PaymentError` with a `code`: `not_configured`, `bad_signature`, `not_found`, `invalid`,
-`rate_limited`, `unavailable`, `no_price`.
+`rate_limited`, `unavailable`, `no_price`, `too_many`.
 
 ## Stripe notes
 
@@ -144,10 +144,12 @@ Errors are `PaymentError` with a `code`: `not_configured`, `bad_signature`, `not
   `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`,
   `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`,
   `charge.dispute.updated`, `charge.dispute.closed`.
-- Price ids are cached per key for ten minutes, and dropped when Stripe refuses a checkout, so a
-  price changed in the dashboard is picked up.
-- Invoice lines carry `lookupKey` only when the price was looked up in this isolate; compare
-  `line.price` with `await stripe.priceId(key)` when you need it.
+- Prices are given by lookup key (`{ lookupKey }`), by id (`{ id }`), or defined in code for one
+  checkout (`{ inline: { amount, currency, name, interval?, taxCode? } }`).
+- Price ids are cached per Stripe account for five minutes, so a price changed in the dashboard is
+  picked up soon after.
+- Newer API versions put only the price id on invoice lines, so `line.lookupKey` is usually null;
+  compare `line.price` with `await stripe.priceId(key)`.
 - When Stripe can't be asked what a refunded or disputed payment paid for, `parseWebhook` throws
   instead of guessing; answer 5xx and Stripe retries.
 

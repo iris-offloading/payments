@@ -223,20 +223,34 @@ test('a refund event fails, rather than guess, when Stripe cannot say what the p
   );
 });
 
-test('prices are cached per Stripe key, and dropped when a checkout is refused', async () => {
+test('prices are cached per Stripe key, shared while in flight, and looked up again after a while', async () => {
+  let clock = NOW;
   let version = 1;
-  const routes: Record<string, Route> = {
-    'GET /v1/prices': () => ({ data: [{ id: `price_v${version}` }] }),
-    'POST /v1/checkout/sessions': (c) => (c.params.get('line_items[0][price]') === `price_v${version}` ? { id: 'cs_1', url: 'u' } : { status: 400, body: { error: { message: 'price archived' } } }),
-  };
-  const api = fakeStripe(routes);
-  const a = createStripeProvider({ secretKey: 'sk_test_cache_a', fetch: api.fetch });
-  const b = createStripeProvider({ secretKey: 'sk_test_cache_b', fetch: api.fetch });
-  const input = { customer: 'cus_1', mode: 'one_time' as const, items: [{ price: { lookupKey: 'pack' } }], successUrl: 's', cancelUrl: 'c' };
-  await a.checkout(input);
-  await b.checkout(input);
-  assert.equal(api.calls.filter((c) => c.path === '/v1/prices').length, 2, 'one lookup per account');
+  const api = fakeStripe({ 'GET /v1/prices': () => ({ data: [{ id: `price_v${version}` }] }) });
+  const make = (secretKey: string) => createStripeProvider({ secretKey, fetch: api.fetch, now: () => clock });
+  const a = make('sk_test_cache_a');
+  const b = make('sk_test_cache_b');
+  assert.deepEqual(await Promise.all([a.priceId('pack'), a.priceId('pack'), b.priceId('pack')]), ['price_v1', 'price_v1', 'price_v1']);
+  assert.equal(api.calls.length, 2, 'one lookup per account, shared while in flight');
   version = 2; // The price changed in Stripe and the key moved.
-  await assert.rejects(a.checkout(input));
-  assert.deepEqual(await a.checkout(input), { id: 'cs_1', url: 'u' });
+  assert.equal(await a.priceId('pack'), 'price_v1');
+  clock += 5 * 60_000;
+  assert.equal(await a.priceId('pack'), 'price_v2');
+});
+
+test('inline prices are sent as price_data', async () => {
+  const { api, stripe } = setup({ 'POST /v1/checkout/sessions': () => ({ id: 'cs_1', url: 'u' }) });
+  await stripe.checkout({
+    customer: 'cus_1',
+    mode: 'subscription',
+    items: [{ price: { inline: { amount: 900, currency: 'usd', name: 'Plus', interval: 'month', taxCode: 'txcd_10105001' } } }],
+    successUrl: 's',
+    cancelUrl: 'c',
+  });
+  const p = api.calls[0]!.params;
+  assert.equal(api.calls.length, 1, 'no price lookup');
+  assert.deepEqual(
+    ['unit_amount', 'currency', 'product_data][name', 'product_data][tax_code', 'recurring][interval'].map((k) => p.get(`line_items[0][price_data][${k}]`)),
+    ['900', 'usd', 'Plus', 'txcd_10105001', 'month'],
+  );
 });

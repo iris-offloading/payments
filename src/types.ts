@@ -12,9 +12,22 @@ export type Metadata = Record<string, string>;
 
 /**
  * A price to buy: `{ lookupKey }` finds the provider's active price by a key the app sets in the
- * provider's dashboard (so sandbox and live run the same code), `{ id }` names it directly.
+ * provider's dashboard (so sandbox and live run the same code), `{ id }` names it directly, and
+ * `{ inline }` defines it in code for this checkout alone.
  */
-export type PriceRef = { lookupKey: string } | { id: string };
+export type PriceRef = { lookupKey: string } | { id: string } | { inline: InlinePrice };
+
+export interface InlinePrice {
+  /** In the currency's smallest unit. */
+  amount: number;
+  currency: string;
+  /** The product name the customer sees. */
+  name: string;
+  /** Bills every interval; required for a subscription. */
+  interval?: 'day' | 'week' | 'month' | 'year';
+  /** A provider tax code, such as Stripe's txcd_10105001. */
+  taxCode?: string;
+}
 
 export interface LineItem {
   price: PriceRef;
@@ -137,6 +150,17 @@ interface EventBase {
   raw: unknown;
 }
 
+interface CheckoutFields {
+  customer: string | null;
+  checkoutSession: string;
+  mode: 'subscription' | 'one_time';
+  subscription: string | null;
+  payment: string | null;
+  /** The app's own id for the buyer, as passed to checkout. */
+  clientReference: string | null;
+  metadata: Metadata;
+}
+
 /**
  * Webhook events, normalized. They say what happened and to whom; they never decide what an app
  * grants. Events can arrive late, twice, or out of order, so an app should treat them as hints to
@@ -144,30 +168,14 @@ interface EventBase {
  */
 export type PaymentEvent = EventBase &
   (
-    | {
+    | (CheckoutFields & {
         type: 'checkout.completed';
-        customer: string | null;
-        checkoutSession: string;
-        mode: 'subscription' | 'one_time';
         /** False while a delayed method (a bank debit) is still confirming; checkout.paid follows. */
         paid: boolean;
-        subscription: string | null;
-        payment: string | null;
         amount: Money | null;
-        clientReference: string | null;
-        metadata: Metadata;
-      }
-    | {
-        /** A delayed payment method confirmed a completed checkout. */
-        type: 'checkout.paid' | 'checkout.failed';
-        customer: string | null;
-        checkoutSession: string;
-        mode: 'subscription' | 'one_time';
-        subscription: string | null;
-        payment: string | null;
-        clientReference: string | null;
-        metadata: Metadata;
-      }
+      })
+    /** A delayed payment method confirmed, or failed, a completed checkout. */
+    | (CheckoutFields & { type: 'checkout.paid' | 'checkout.failed' })
     | {
         type: 'subscription.created' | 'subscription.updated' | 'subscription.deleted';
         customer: string;
