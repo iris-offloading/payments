@@ -299,12 +299,12 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
 
     getSubscription,
 
-    async cancelSubscription(id, { at = 'now' } = {}) {
+    async cancelSubscription(id, { at = 'now', idempotencyKey } = {}) {
       const path = `/v1/subscriptions/${encodeURIComponent(id)}`;
       const s =
         at === 'now'
-          ? await request<Obj>('DELETE', path, { expand: ['latest_invoice'] })
-          : await request<Obj>('POST', path, { cancel_at_period_end: true, expand: ['latest_invoice'] });
+          ? await request<Obj>('DELETE', path, { expand: ['latest_invoice'] }, { idempotencyKey })
+          : await request<Obj>('POST', path, { cancel_at_period_end: true, expand: ['latest_invoice'] }, { idempotencyKey });
       return toSubscription(s);
     },
 

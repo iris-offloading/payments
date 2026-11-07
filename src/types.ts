@@ -273,7 +273,7 @@ export interface PaymentProvider {
   /** The customer's subscriptions and one-time purchases as the provider has them now. */
   customerState(customer: string): Promise<CustomerState>;
   getSubscription(id: string): Promise<Subscription | null>;
-  cancelSubscription(id: string, opts?: { at?: 'now' | 'period_end' }): Promise<Subscription>;
+  cancelSubscription(id: string, opts?: { at?: 'now' | 'period_end'; idempotencyKey?: string }): Promise<Subscription>;
   /** A payment and what it paid for, by Payment id or (Stripe) charge id. */
   resolvePayment(id: string): Promise<Payment | null>;
   /** What a payment paid for, for a Payment whose purpose an event left 'unknown'. */

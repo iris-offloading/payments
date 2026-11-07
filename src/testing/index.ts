@@ -138,7 +138,7 @@ export class FakeProvider implements PaymentProvider {
     return this.subscriptions.get(id) ?? null;
   }
 
-  async cancelSubscription(id: string, { at = 'now' }: { at?: 'now' | 'period_end' } = {}) {
+  async cancelSubscription(id: string, { at = 'now' }: { at?: 'now' | 'period_end'; idempotencyKey?: string } = {}) {
     const s = this.subscriptions.get(id);
     if (!s) throw new PaymentError('not_found', `No subscription ${id}.`);
     if (at === 'now') this.endSubscription(s);
