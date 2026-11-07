@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS payment_events (id TEXT PRIMARY KEY, provider TEXT NO
 | `customerState(customer)` | All subscriptions and paid one-time purchases, as the provider has them now |
 | `getSubscription(id)`, `cancelSubscription(id, { at })` | Read one; cancel now or at period end |
 | `resolvePayment(id)` | A payment and what it paid for (subscription invoice or one-time checkout) |
+| `paymentPurpose(payment)` | What a payment paid for, when an event left it `unknown` |
 | `refund({ payment, amount? })` | Full or partial refund |
 | `parseWebhook(request)` | Verified, normalized `PaymentEvent` |
 
@@ -150,8 +151,10 @@ Errors are `PaymentError` with a `code`: `not_configured`, `bad_signature`, `not
   picked up soon after.
 - Newer API versions put only the price id on invoice lines, so `line.lookupKey` is usually null;
   compare `line.price` with `await stripe.priceId(key)`.
-- When Stripe can't be asked what a refunded or disputed payment paid for, `parseWebhook` throws
-  instead of guessing; answer 5xx and Stripe retries.
+- `parseWebhook` asks Stripe what a refunded or disputed payment paid for (1 to 3 calls). When it
+  can't, it throws instead of guessing; answer 5xx and Stripe retries. An app that usually knows
+  from its own records passes `resolvePayments: false` and calls `paymentPurpose` /
+  `resolvePayment` only when it needs to.
 
 ## Adding a provider
 

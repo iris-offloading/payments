@@ -276,6 +276,8 @@ export interface PaymentProvider {
   cancelSubscription(id: string, opts?: { at?: 'now' | 'period_end' }): Promise<Subscription>;
   /** A payment and what it paid for, by Payment id or (Stripe) charge id. */
   resolvePayment(id: string): Promise<Payment | null>;
+  /** What a payment paid for, for a Payment whose purpose an event left 'unknown'. */
+  paymentPurpose(payment: Payment): Promise<PaymentPurpose>;
 
   refund(input: RefundInput): Promise<Refund>;
 

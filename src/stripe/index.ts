@@ -31,6 +31,12 @@ export interface StripeOptions {
   account?: string;
   /** Clock for webhook checks and the price cache, for tests. */
   now?: () => number;
+  /**
+   * Whether parseWebhook asks Stripe what a refunded or disputed payment paid for (1 to 3 calls).
+   * When false, refund events carry purpose 'unknown' and dispute events no payment; call
+   * paymentPurpose or resolvePayment where the app needs them. Default true.
+   */
+  resolvePayments?: boolean;
 }
 
 export interface StripeProvider extends PaymentProvider {
@@ -94,6 +100,7 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
   const livemode = opts.livemode ?? /^[rs]k_live_/.test(key ?? '');
   const secrets = (Array.isArray(opts.webhookSecret) ? opts.webhookSecret : [opts.webhookSecret]).filter((s): s is string => !!s);
   const now = opts.now ?? Date.now;
+  const resolve = opts.resolvePayments ?? true;
   // One Stripe account per key (and connected account), so cached prices never cross accounts.
   const cache = `${key ?? ''}|${opts.account ?? ''}|`;
 
@@ -133,12 +140,14 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
   async function purposeOf(charge: Obj): Promise<PaymentPurpose> {
     const pi = str(charge.payment_intent);
     // Older API versions name the invoice on the charge; newer ones list it under invoice payments.
-    const invoice: Obj | null =
+    const invoice: Obj | string | null =
       typeof charge.invoice === 'string'
         ? await request<Obj>('GET', `/v1/invoices/${encodeURIComponent(charge.invoice)}`)
         : pi
-          ? ((await request<{ data: { invoice: Obj | null }[] }>('GET', '/v1/invoice_payments', { payment: { type: 'payment_intent', payment_intent: pi }, expand: ['data.invoice'], limit: 1 })).data[0]?.invoice ?? null)
+          ? ((await request<{ data: { invoice: Obj | string | null }[] }>('GET', '/v1/invoice_payments', { payment: { type: 'payment_intent', payment_intent: pi }, expand: ['data.invoice'], limit: 1 })).data[0]?.invoice ?? null)
           : null;
+    // Expanded as asked, or else just its id.
+    if (typeof invoice === 'string') return purposeOf({ ...charge, invoice });
     const sub = invoice && typeof invoice === 'object' ? invoiceSubscription(invoice) : null;
     if (invoice && sub) return { kind: 'subscription', subscription: sub, invoice: invoice.id, reason: invoiceReason(invoice), lines: invoiceLines(invoice) };
     if (!pi) return { kind: 'unknown' };
@@ -200,13 +209,13 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
           lines: invoiceLines(o),
         };
       case 'payment.refunded':
-        return { ...base, type, customer, payment: toPayment(o, await purposeOf(o)), refunded: o.amount_refunded ?? 0 };
+        return { ...base, type, customer, payment: toPayment(o, resolve ? await purposeOf(o) : { kind: 'unknown' }), refunded: o.amount_refunded ?? 0 };
       case 'dispute.opened':
       case 'dispute.updated':
       case 'dispute.closed': {
         const dispute = toDispute(o);
         const ref = dispute.charge ?? dispute.payment;
-        const payment = ref ? await resolvePayment(ref) : null;
+        const payment = ref && resolve ? await resolvePayment(ref) : null;
         return { ...base, type, customer: payment?.customer ?? null, dispute, payment };
       }
       case 'customer.updated':
@@ -300,6 +309,8 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
     },
 
     resolvePayment,
+
+    paymentPurpose: (payment) => purposeOf({ payment_intent: payment.id }),
 
     async refund(input: RefundInput): Promise<Refund> {
       const target = isChargeId(input.payment) ? { charge: input.payment } : { payment_intent: input.payment };

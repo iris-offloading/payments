@@ -254,3 +254,18 @@ test('inline prices are sent as price_data', async () => {
     ['900', 'usd', 'Plus', 'txcd_10105001', 'month'],
   );
 });
+
+test('with resolvePayments off, refunds and disputes ask Stripe nothing until the app does', async () => {
+  const api = fakeStripe({
+    'GET /v1/invoice_payments': () => ({ data: [{ invoice: 'in_1' }] }),
+    'GET /v1/invoices/in_1': () => ({ id: 'in_1', billing_reason: 'subscription_cycle', parent: { subscription_details: { subscription: 'sub_1' } }, lines: { data: [] } }),
+  });
+  const stripe = createStripeProvider({ secretKey: 'sk_test_lazy', webhookSecret: SECRET, fetch: api.fetch, now: () => NOW, resolvePayments: false });
+  const e = await stripe.parseWebhook(await webhook(ev('charge.refunded', { id: 'ch_1', payment_intent: 'pi_1', customer: 'cus_1', amount: 900, amount_refunded: 900, currency: 'usd' })));
+  const d = await stripe.parseWebhook(await webhook(ev('charge.dispute.created', { id: 'dp_1', charge: 'ch_1', payment_intent: 'pi_1', amount: 900, currency: 'usd', status: 'needs_response' })));
+  assert.equal(api.calls.length, 0);
+  assert.ok(e.type === 'payment.refunded' && e.payment.purpose.kind === 'unknown');
+  assert.ok(d.type === 'dispute.opened' && d.payment === null);
+  // An unexpanded invoice id is fetched.
+  if (e.type === 'payment.refunded') assert.deepEqual(await stripe.paymentPurpose(e.payment), { kind: 'subscription', subscription: 'sub_1', invoice: 'in_1', reason: 'cycle', lines: [] });
+});
