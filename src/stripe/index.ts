@@ -261,6 +261,7 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
         {
           mode: mode === 'one_time' ? 'payment' : 'subscription',
           customer: input.customer,
+          customer_email: input.customer ? undefined : input.email,
           line_items,
           success_url: input.successUrl,
           cancel_url: input.cancelUrl,
@@ -269,7 +270,7 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
           allow_promotion_codes: input.allowPromotionCodes,
           automatic_tax: input.automaticTax && { enabled: true },
           // Automatic tax needs an address, which Checkout may save on the existing customer.
-          customer_update: input.automaticTax && { address: 'auto', name: 'auto' },
+          customer_update: input.automaticTax && input.customer ? { address: 'auto', name: 'auto' } : undefined,
           subscription_data: mode === 'subscription' ? { metadata, trial_period_days: input.trialDays } : undefined,
           payment_intent_data: mode === 'one_time' ? { metadata } : undefined,
           invoice_creation: mode === 'one_time' && input.invoice ? { enabled: true } : undefined,

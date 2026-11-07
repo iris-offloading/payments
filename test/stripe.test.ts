@@ -269,3 +269,10 @@ test('with resolvePayments off, refunds and disputes ask Stripe nothing until th
   // An unexpanded invoice id is fetched.
   if (e.type === 'payment.refunded') assert.deepEqual(await stripe.paymentPurpose(e.payment.id), { kind: 'subscription', subscription: 'sub_1', invoice: 'in_1', reason: 'cycle', lines: [] });
 });
+
+test('a guest checkout sends the email instead of a customer', async () => {
+  const { api, stripe } = setup({ 'POST /v1/checkout/sessions': () => ({ id: 'cs_1', url: 'u' }) });
+  await stripe.checkout({ mode: 'one_time', email: 'a@b.c', items: [{ price: { id: 'price_1' } }], successUrl: 's', cancelUrl: 'c', automaticTax: true });
+  const p = api.calls[0]!.params;
+  assert.deepEqual([p.get('customer'), p.get('customer_email'), p.get('customer_update[address]'), p.get('automatic_tax[enabled]')], [null, 'a@b.c', null, 'true']);
+});

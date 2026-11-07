@@ -190,16 +190,18 @@ export class FakeProvider implements PaymentProvider {
     const from = this.events.length;
     const total = s.prices.reduce((n, p) => n + p.amount * p.quantity, 0);
     const metadata: Metadata = { ...s.input.metadata };
-    const common = { customer: s.input.customer, checkoutSession: id, clientReference: s.input.clientReference ?? null, metadata };
+    // A guest buying once stays a guest; a subscription always gets a customer, as with Stripe.
+    const customer = s.input.customer ?? (s.input.mode === 'subscription' ? this.id('cus') : null);
+    const common = { customer, checkoutSession: id, clientReference: s.input.clientReference ?? null, metadata };
     if (s.input.mode === 'one_time') {
-      const payment = paid ? this.pay(s.input.customer, total, { kind: 'one_time', checkoutSession: id, metadata }) : null;
+      const payment = paid ? this.pay(customer, total, { kind: 'one_time', checkoutSession: id, metadata }) : null;
       if (payment) this.purchases.push({ checkoutSession: id, payment: payment.id, amount: this.money(total), created: this.now(), metadata, raw: null });
       this.emit({ type: 'checkout.completed', ...common, mode: 'one_time', paid, subscription: null, payment: payment?.id ?? null, amount: this.money(total) });
     } else {
       const start = this.now();
       const sub: Subscription = {
         id: this.id('sub'),
-        customer: s.input.customer,
+        customer: customer!,
         status: paid ? (s.input.trialDays ? 'trialing' : 'active') : 'incomplete',
         live: false,
         items: s.prices.map((p) => ({ price: p.price, lookupKey: p.lookupKey, quantity: p.quantity })),
@@ -263,7 +265,7 @@ export class FakeProvider implements PaymentProvider {
     return d;
   }
 
-  private pay(customer: string, amount: number, purpose: Payment['purpose']): Payment {
+  private pay(customer: string | null, amount: number, purpose: Payment['purpose']): Payment {
     const p: Payment = { id: this.id('pi'), charge: this.id('ch'), customer, amount: this.money(amount), refunded: 0, purpose, created: this.now(), metadata: {} };
     this.payments.set(p.id, p);
     return p;

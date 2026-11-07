@@ -212,7 +212,10 @@ export type PaymentEvent = EventBase &
 export type PaymentEventType = PaymentEvent['type'];
 
 export interface CheckoutInput {
-  customer: string;
+  /** The provider customer; left out for a guest purchase, where checkout asks for an email. */
+  customer?: string;
+  /** Prefills a guest's email. */
+  email?: string;
   mode: 'subscription' | 'one_time';
   items: LineItem[];
   successUrl: string;

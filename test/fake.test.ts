@@ -119,3 +119,10 @@ test('inline prices work for subscriptions and their renewals', async () => {
   const [renewal] = pay.renew(sub.id);
   assert.ok(renewal?.type === 'invoice.paid' && renewal.amount.amount === 900);
 });
+
+test('a guest can buy once without a customer', async () => {
+  const pay = new FakeProvider({ prices: {} });
+  const { id } = await pay.checkout({ mode: 'one_time', items: [{ price: { inline: { amount: 1990, currency: 'usd', name: 'Starter' } } }], successUrl: 'x', cancelUrl: 'y', metadata: { logo: 'l1' } });
+  const [done] = pay.completeCheckout(id);
+  assert.ok(done?.type === 'checkout.completed' && done.customer === null && done.paid && done.metadata.logo === 'l1');
+});

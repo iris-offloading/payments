@@ -108,7 +108,7 @@ CREATE TABLE IF NOT EXISTS payment_events (id TEXT PRIMARY KEY, provider TEXT NO
 | --- | --- |
 | `ensureCustomer({ userId, email, existing? })` | `existing`, or a new customer (two calls at once get one; store the id) |
 | `deleteCustomer(id)` | Deletes it, which ends its subscriptions |
-| `checkout(input)` | Hosted checkout for a subscription or a one-time purchase |
+| `checkout(input)` | Hosted checkout for a subscription or a one-time purchase (`customer` optional for a guest) |
 | `portal({ customer, returnUrl, flow? })` | Hosted page to manage or cancel subscriptions |
 | `customerState(customer)` | All subscriptions and paid one-time purchases, as the provider has them now |
 | `getSubscription(id)`, `cancelSubscription(id, { at })` | Read one; cancel now or at period end |
