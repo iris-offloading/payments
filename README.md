@@ -68,7 +68,7 @@ app.post('/billing/webhook', async (c) => {
     if (isPaymentError(err, 'bad_signature')) return c.text('Bad signature', 400);
     throw err;
   }
-  await processOnce(c.env.DB, event, async (e) => {
+  const result = await processOnce(c.env.DB, event, async (e) => {
     switch (e.type) {
       case 'checkout.completed':
       case 'subscription.updated':
@@ -89,21 +89,24 @@ app.post('/billing/webhook', async (c) => {
         break;
     }
   });
+  // Another delivery of this event is still being applied: let Stripe retry later.
+  if (result === 'busy') return c.text('Busy', 409);
   return c.json({ received: true });
 });
 ```
 
-`processOnce` needs this table in a migration (`PAYMENT_EVENTS_SQL` holds the same SQL):
+`processOnce` claims each event before applying it and marks it done after. A claim whose Worker
+died mid-apply lapses after five minutes, so Stripe's retry applies the event then. It needs this table in a migration (`PAYMENT_EVENTS_SQL` holds the same SQL):
 
 ```sql
-CREATE TABLE IF NOT EXISTS payment_events (id TEXT PRIMARY KEY, provider TEXT NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS payment_events (id TEXT PRIMARY KEY, provider TEXT NOT NULL, type TEXT NOT NULL, created_at INTEGER NOT NULL, done INTEGER NOT NULL DEFAULT 0);
 ```
 
 ## The provider interface
 
 | Method | Does |
 | --- | --- |
-| `ensureCustomer({ userId, email, existing? })` | The provider customer for an app user, created once |
+| `ensureCustomer({ userId, email, existing? })` | `existing`, or a new customer (two calls at once get one; store the id) |
 | `deleteCustomer(id)` | Deletes it, which ends its subscriptions |
 | `checkout(input)` | Hosted checkout for a subscription or a one-time purchase |
 | `portal({ customer, returnUrl, flow? })` | Hosted page to manage or cancel subscriptions |
@@ -141,8 +144,12 @@ Errors are `PaymentError` with a `code`: `not_configured`, `bad_signature`, `not
   `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`,
   `invoice.paid`, `invoice.payment_failed`, `charge.refunded`, `charge.dispute.created`,
   `charge.dispute.updated`, `charge.dispute.closed`.
+- Price ids are cached per key for ten minutes, and dropped when Stripe refuses a checkout, so a
+  price changed in the dashboard is picked up.
 - Invoice lines carry `lookupKey` only when the price was looked up in this isolate; compare
   `line.price` with `await stripe.priceId(key)` when you need it.
+- When Stripe can't be asked what a refunded or disputed payment paid for, `parseWebhook` throws
+  instead of guessing; answer 5xx and Stripe retries.
 
 ## Adding a provider
 

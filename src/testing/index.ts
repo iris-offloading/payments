@@ -59,6 +59,11 @@ export class FakeProvider implements PaymentProvider {
     this.opts = { currency: 'usd', periodMs: 30 * DAY, webhookSecret: 'fake_secret', now: Date.now, ...opts };
   }
 
+  /** The id the fake gives the price with this lookup key. */
+  static priceId(lookupKey: string) {
+    return `price_${lookupKey}`;
+  }
+
   private id(prefix: string) {
     return `${prefix}_${++this.seq}`;
   }
@@ -98,9 +103,10 @@ export class FakeProvider implements PaymentProvider {
 
   async checkout(input: CheckoutInput) {
     const prices = input.items.map((i) => {
-      const lookupKey = 'lookupKey' in i.price ? i.price.lookupKey : i.price.id;
+      // A price's id is `price_` and its lookup key.
+      const lookupKey = 'lookupKey' in i.price ? i.price.lookupKey : i.price.id.replace(/^price_/, '');
       this.priceOf(lookupKey);
-      return { price: `price_${lookupKey}`, lookupKey, quantity: i.quantity ?? 1 };
+      return { price: FakeProvider.priceId(lookupKey), lookupKey, quantity: i.quantity ?? 1 };
     });
     const id = this.id('cs');
     this.sessions.set(id, { id, input, prices, status: 'open' });
@@ -192,7 +198,8 @@ export class FakeProvider implements PaymentProvider {
       };
       this.subscriptions.set(sub.id, sub);
       this.emit({ type: 'subscription.created', customer: sub.customer, subscription: { ...sub } });
-      const payment = paid ? this.invoice(sub, 'create', total) : null;
+      // A trial's first invoice is for nothing.
+      const payment = paid ? this.invoice(sub, 'create', s.input.trialDays ? 0 : total) : null;
       this.emit({ type: 'checkout.completed', ...common, mode: 'subscription', paid, subscription: sub.id, payment: payment?.id ?? null, amount: this.money(total) });
     }
     return this.events.slice(from);
@@ -249,7 +256,7 @@ export class FakeProvider implements PaymentProvider {
 
   private invoice(s: Subscription, reason: 'create' | 'cycle', total: number): Payment {
     const invoice = this.id('in');
-    const lines = s.items.map((i) => ({ price: i.price, lookupKey: i.lookupKey, amount: this.priceOf(i.lookupKey!) * i.quantity, period: { ...s.period! } }));
+    const lines = s.items.map((i) => ({ price: i.price, lookupKey: i.lookupKey, amount: total && this.priceOf(i.lookupKey!) * i.quantity, period: { ...s.period! } }));
     const payment = this.pay(s.customer, total, { kind: 'subscription', subscription: s.id, invoice, reason, lines });
     s.latestInvoicePaid = true;
     this.emit({ type: 'invoice.paid', customer: s.customer, subscription: s.id, invoice, reason, amount: this.money(total), lines });

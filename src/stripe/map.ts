@@ -7,7 +7,8 @@ export type Obj = Record<string, any>;
 
 const ms = (sec: unknown): number => (typeof sec === 'number' ? sec * 1000 : 0);
 const msOrNull = (sec: unknown): number | null => (typeof sec === 'number' ? sec * 1000 : null);
-const str = (v: unknown): string | null => (typeof v === 'string' ? v : v && typeof v === 'object' && typeof (v as Obj).id === 'string' ? (v as Obj).id : null);
+/** An id, whether Stripe sent the id or the expanded object. */
+export const str = (v: unknown): string | null => (typeof v === 'string' ? v : v && typeof v === 'object' && typeof (v as Obj).id === 'string' ? (v as Obj).id : null);
 export const meta = (v: unknown): Metadata => (v && typeof v === 'object' ? { ...(v as Metadata) } : {});
 const money = (amount: unknown, currency: unknown): Money => ({ amount: typeof amount === 'number' ? amount : 0, currency: typeof currency === 'string' ? currency : '' });
 
@@ -20,7 +21,8 @@ export function toSubscription(s: Obj): Subscription {
   const first = items[0] ?? {};
   const start = first.current_period_start ?? s.current_period_start;
   const end = first.current_period_end ?? s.current_period_end;
-  const endsAt = s.cancel_at ?? (s.cancel_at_period_end ? end : null);
+  // Ended at once (a cancel now, or unpaid) has ended_at; a cancel later, cancel_at or the period end.
+  const endsAt = s.ended_at ?? s.cancel_at ?? (s.cancel_at_period_end ? end : null);
   const inv = s.latest_invoice;
   const status = s.status as SubscriptionStatus;
   return {

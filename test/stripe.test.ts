@@ -209,3 +209,34 @@ test('subscription events carry the subscription, and unknown events are unhandl
   assert.equal(other.type, 'unhandled');
   assert.equal(other.providerType, 'payout.paid');
 });
+
+test('a subscription cancelled now says when it ended', async () => {
+  const { stripe } = setup({ 'DELETE /v1/subscriptions/sub_1': () => ({ id: 'sub_1', customer: 'cus_1', status: 'canceled', created: 1, ended_at: 50, canceled_at: 50, cancel_at: null, cancel_at_period_end: false, items: { data: [] } }) });
+  assert.equal((await stripe.cancelSubscription('sub_1')).endsAt, 50_000);
+});
+
+test('a refund event fails, rather than guess, when Stripe cannot say what the payment was for', async () => {
+  const { stripe } = setup({ 'GET /v1/invoice_payments': () => ({ status: 503, body: { error: { message: 'down' } } }) });
+  await assert.rejects(
+    stripe.parseWebhook(await webhook(ev('charge.refunded', { id: 'ch_1', payment_intent: 'pi_1', amount: 2400, amount_refunded: 2400, currency: 'usd' }))),
+    (e: unknown) => e instanceof PaymentError && e.code === 'unavailable',
+  );
+});
+
+test('prices are cached per Stripe key, and dropped when a checkout is refused', async () => {
+  let version = 1;
+  const routes: Record<string, Route> = {
+    'GET /v1/prices': () => ({ data: [{ id: `price_v${version}` }] }),
+    'POST /v1/checkout/sessions': (c) => (c.params.get('line_items[0][price]') === `price_v${version}` ? { id: 'cs_1', url: 'u' } : { status: 400, body: { error: { message: 'price archived' } } }),
+  };
+  const api = fakeStripe(routes);
+  const a = createStripeProvider({ secretKey: 'sk_test_cache_a', fetch: api.fetch });
+  const b = createStripeProvider({ secretKey: 'sk_test_cache_b', fetch: api.fetch });
+  const input = { customer: 'cus_1', mode: 'one_time' as const, items: [{ price: { lookupKey: 'pack' } }], successUrl: 's', cancelUrl: 'c' };
+  await a.checkout(input);
+  await b.checkout(input);
+  assert.equal(api.calls.filter((c) => c.path === '/v1/prices').length, 2, 'one lookup per account');
+  version = 2; // The price changed in Stripe and the key moved.
+  await assert.rejects(a.checkout(input));
+  assert.deepEqual(await a.checkout(input), { id: 'cs_1', url: 'u' });
+});

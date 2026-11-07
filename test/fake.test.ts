@@ -1,7 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FakeProvider } from '../src/testing/index.ts';
-import { processOnce, type D1Like } from '../src/d1.ts';
+import { DatabaseSync } from 'node:sqlite';
+
+type SQLInputValue = null | number | bigint | string | Uint8Array;
+import { PAYMENT_EVENTS_SQL, processOnce, type D1Like } from '../src/d1.ts';
 import { PaymentError } from '../src/errors.ts';
 
 const DAY = 86_400_000;
@@ -58,31 +61,23 @@ test('one-time purchases show in customerState', async () => {
   assert.deepEqual(purchases.map((p) => [p.checkoutSession, p.amount.amount, p.metadata.pack]), [[id, 1000, '100']]);
 });
 
-/** A D1 stand-in holding one table's ids. */
-function memoryDb(): D1Like & { ids: Set<string> } {
-  const ids = new Set<string>();
+/** D1's API over node:sqlite, enough for processOnce. */
+function sqliteDb(): D1Like & { sql: DatabaseSync } {
+  const sql = new DatabaseSync(':memory:');
+  sql.exec(PAYMENT_EVENTS_SQL);
   return {
-    ids,
-    prepare(sql: string) {
-      return {
-        bind: (...v: unknown[]) => ({
-          run: async () => {
-            const id = String(v[0]);
-            if (sql.startsWith('INSERT')) {
-              const had = ids.has(id);
-              ids.add(id);
-              return { meta: { changes: had ? 0 : 1 } };
-            }
-            return { meta: { changes: ids.delete(id) ? 1 : 0 } };
-          },
-        }),
-      };
-    },
+    sql,
+    prepare: (query: string) => ({
+      bind: (...v: unknown[]) => ({
+        run: async () => ({ meta: { changes: Number(sql.prepare(query).run(...(v as SQLInputValue[])).changes) } }),
+        first: async <T>() => (sql.prepare(query).get(...(v as SQLInputValue[])) as T | undefined) ?? null,
+      }),
+    }),
   };
 }
 
 test('processOnce applies an event once, and forgets it when applying fails', async () => {
-  const db = memoryDb();
+  const db = sqliteDb();
   const event = { id: 'evt_1', provider: 'stripe', type: 'invoice.paid' };
   let applied = 0;
   assert.equal(await processOnce(db, event, async () => void applied++), 'applied');
@@ -91,6 +86,25 @@ test('processOnce applies an event once, and forgets it when applying fails', as
 
   const failing = { ...event, id: 'evt_2' };
   await assert.rejects(processOnce(db, failing, async () => { throw new Error('db down'); }), /db down/);
-  assert.equal(db.ids.has('stripe:evt_2'), false, 'forgotten so the retry applies it');
-  assert.equal(await processOnce(db, failing, async () => {}), 'applied');
+  assert.equal(await processOnce(db, failing, async () => {}), 'applied', 'the retry applies it');
+});
+
+test('processOnce holds an unfinished claim for its lease, then lets a retry take over', async () => {
+  const db = sqliteDb();
+  const event = { id: 'evt_1', provider: 'stripe', type: 'invoice.paid' };
+  // A Worker that died mid-apply: claimed, never done.
+  db.sql.prepare("INSERT INTO payment_events (id, provider, type, created_at) VALUES ('stripe:evt_1', 'stripe', 'invoice.paid', 1000)").run();
+  assert.equal(await processOnce(db, event, async () => {}, { now: () => 1000 + 60_000 }), 'busy');
+  assert.equal(await processOnce(db, event, async () => {}, { now: () => 1000 + 5 * 60_000 }), 'applied');
+  assert.equal(await processOnce(db, event, async () => {}, { now: () => 1000 + 60 * 60_000 }), 'duplicate');
+});
+
+test('the fake takes price ids as well as lookup keys, and a trial starts free', async () => {
+  const pay = new FakeProvider({ prices: { pro: 2400 } });
+  const customer = await pay.ensureCustomer({ userId: 'u1', email: 'a@b.c' });
+  const { id } = await pay.checkout({ customer, mode: 'subscription', items: [{ price: { id: FakeProvider.priceId('pro') } }], successUrl: 'x', cancelUrl: 'y', trialDays: 7 });
+  const events = pay.completeCheckout(id);
+  const paid = events.find((e) => e.type === 'invoice.paid');
+  assert.ok(paid?.type === 'invoice.paid' && paid.amount.amount === 0);
+  assert.equal((await pay.customerState(customer)).subscriptions[0]?.status, 'trialing');
 });
