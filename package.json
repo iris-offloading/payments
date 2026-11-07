@@ -1,0 +1,27 @@
+{
+  "name": "@iris-offloading/payments",
+  "version": "0.1.0",
+  "description": "Provider-agnostic payments for SaaS apps on Workers: subscriptions, one-time purchases, refunds, disputes and webhooks. Stripe first.",
+  "private": true,
+  "license": "UNLICENSED",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./stripe": { "types": "./dist/stripe/index.d.ts", "default": "./dist/stripe/index.js" },
+    "./testing": { "types": "./dist/testing/index.d.ts", "default": "./dist/testing/index.js" },
+    "./d1": { "types": "./dist/d1.d.ts", "default": "./dist/d1.js" }
+  },
+  "files": ["dist", "src"],
+  "engines": { "node": ">=22.6" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test --experimental-strip-types --no-warnings test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.7",
+    "typescript": "7.0.2"
+  }
+}
