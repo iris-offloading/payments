@@ -225,6 +225,8 @@ export interface CheckoutInput {
   automaticTax?: boolean;
   /** Days of free trial for a subscription. */
   trialDays?: number;
+  /** For a one-time purchase: also make an invoice, so it shows in the customer's billing history. */
+  invoice?: boolean;
   idempotencyKey?: string;
 }
 
@@ -276,8 +278,8 @@ export interface PaymentProvider {
   cancelSubscription(id: string, opts?: { at?: 'now' | 'period_end'; idempotencyKey?: string }): Promise<Subscription>;
   /** A payment and what it paid for, by Payment id or (Stripe) charge id. */
   resolvePayment(id: string): Promise<Payment | null>;
-  /** What a payment paid for, for a Payment whose purpose an event left 'unknown'. */
-  paymentPurpose(payment: Payment): Promise<PaymentPurpose>;
+  /** What payment `id` (a Payment id) paid for, for a Payment whose purpose an event left 'unknown'. */
+  paymentPurpose(id: string): Promise<PaymentPurpose>;
 
   refund(input: RefundInput): Promise<Refund>;
 

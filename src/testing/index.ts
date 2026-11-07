@@ -153,8 +153,8 @@ export class FakeProvider implements PaymentProvider {
     return this.payments.get(id) ?? null;
   }
 
-  async paymentPurpose(payment: Payment) {
-    return this.payments.get(payment.id)?.purpose ?? { kind: 'unknown' as const };
+  async paymentPurpose(id: string) {
+    return this.payments.get(id)?.purpose ?? { kind: 'unknown' as const };
   }
 
   async refund(input: RefundInput): Promise<Refund> {

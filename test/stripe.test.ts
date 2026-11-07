@@ -267,5 +267,5 @@ test('with resolvePayments off, refunds and disputes ask Stripe nothing until th
   assert.ok(e.type === 'payment.refunded' && e.payment.purpose.kind === 'unknown');
   assert.ok(d.type === 'dispute.opened' && d.payment === null);
   // An unexpanded invoice id is fetched.
-  if (e.type === 'payment.refunded') assert.deepEqual(await stripe.paymentPurpose(e.payment), { kind: 'subscription', subscription: 'sub_1', invoice: 'in_1', reason: 'cycle', lines: [] });
+  if (e.type === 'payment.refunded') assert.deepEqual(await stripe.paymentPurpose(e.payment.id), { kind: 'subscription', subscription: 'sub_1', invoice: 'in_1', reason: 'cycle', lines: [] });
 });

@@ -272,6 +272,7 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
           customer_update: input.automaticTax && { address: 'auto', name: 'auto' },
           subscription_data: mode === 'subscription' ? { metadata, trial_period_days: input.trialDays } : undefined,
           payment_intent_data: mode === 'one_time' ? { metadata } : undefined,
+          invoice_creation: mode === 'one_time' && input.invoice ? { enabled: true } : undefined,
         },
         { idempotencyKey: input.idempotencyKey },
       );
@@ -310,7 +311,7 @@ export function createStripeProvider(opts: StripeOptions): StripeProvider {
 
     resolvePayment,
 
-    paymentPurpose: (payment) => purposeOf({ payment_intent: payment.id }),
+    paymentPurpose: (id) => purposeOf({ payment_intent: id }),
 
     async refund(input: RefundInput): Promise<Refund> {
       const target = isChargeId(input.payment) ? { charge: input.payment } : { payment_intent: input.payment };
